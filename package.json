@@ -1,0 +1,37 @@
+{
+  "name": "quarry",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A structured bug tracker with a two-axis workflow, dependency graphs, and regression-ancestry detection.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c yellow,cyan \"npm run dev:api\" \"npm run dev:web\"",
+    "dev:api": "cross-env NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx watch server/index.ts",
+    "dev:web": "vite client",
+    "seed": "cross-env NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/seed-cli.ts",
+    "build": "tsc -p tsconfig.json --noEmit && vite build client",
+    "start": "cross-env NODE_ENV=production NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/index.ts",
+    "test": "cross-env NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --test tests/api.test.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.13.7",
+    "hono": "^4.6.14",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.17",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3"
+  }
+}

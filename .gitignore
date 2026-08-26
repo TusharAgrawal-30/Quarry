@@ -1,0 +1,19 @@
+# dependencies
+node_modules/
+
+# build output
+client/dist/
+
+# local database
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# environment
+.env
+.env.*
+
+# logs & OS noise
+*.log
+.DS_Store
