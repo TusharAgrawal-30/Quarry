@@ -1,5 +1,9 @@
 import { Hono } from 'hono';
+import { streamSSE } from 'hono/streaming';
 import type { DB } from './db.js';
+import { Realtime } from './realtime.js';
+import type { SecurityOptions } from './security.js';
+import { bodyLimitMiddleware, corsMiddleware, DEFAULTS, headersMiddleware, rateLimitMiddleware } from './security.js';
 import { analyticsSummary, dependencyGraph } from './domain/analytics.js';
 import { ancestryChain, computeLineage } from './domain/lineage.js';
 import { PRIORITIES, RESOLUTIONS, SEVERITIES, STATUSES } from './domain/types.js';
@@ -20,8 +24,19 @@ import {
   updateIssue,
 } from './store.js';
 
-export function createApp(db: DB): Hono {
+export function createApp(db: DB, security: SecurityOptions = {}): Hono {
   const app = new Hono();
+  const rt = new Realtime();
+  const sec = {
+    allowedOrigins: security.allowedOrigins ?? DEFAULTS.allowedOrigins,
+    rateLimit: security.rateLimit ?? DEFAULTS.rateLimit,
+    maxBodyBytes: security.maxBodyBytes ?? DEFAULTS.maxBodyBytes,
+  };
+
+  app.use('*', headersMiddleware());
+  app.use('/api/*', corsMiddleware(sec.allowedOrigins));
+  app.use('/api/*', bodyLimitMiddleware(sec.maxBodyBytes));
+  app.use('/api/*', rateLimitMiddleware(sec.rateLimit));
 
   app.onError((err, c) => {
     if (err instanceof ApiError) {
@@ -75,40 +90,53 @@ export function createApp(db: DB): Hono {
       throw new ApiError(400, 'invalid_json', 'Request body must be valid JSON.');
     });
     const { actorId, ...patch } = body;
-    return c.json(updateIssue(db, c.req.param('key'), patch, actorId));
+    const updated = updateIssue(db, c.req.param('key'), patch, actorId);
+    rt.publishChange(updated.key, Number(actorId), 'edit');
+    return c.json(updated);
   });
 
   app.post('/api/issues/:key/transition', async (c) => {
     const body = await c.req.json().catch(() => {
       throw new ApiError(400, 'invalid_json', 'Request body must be valid JSON.');
     });
-    return c.json(transitionIssue(db, c.req.param('key'), body));
+    const updated = transitionIssue(db, c.req.param('key'), body);
+    rt.publishChange(updated.key, Number(body.actorId), 'transition');
+    return c.json(updated);
   });
 
   app.post('/api/issues/:key/comments', async (c) => {
     const body = await c.req.json().catch(() => {
       throw new ApiError(400, 'invalid_json', 'Request body must be valid JSON.');
     });
-    return c.json(addComment(db, c.req.param('key'), body.body, body.actorId), 201);
+    const comment = addComment(db, c.req.param('key'), body.body, body.actorId);
+    rt.publishChange(c.req.param('key').toUpperCase(), Number(body.actorId), 'comment');
+    return c.json(comment, 201);
   });
 
   app.post('/api/issues/:key/relations', async (c) => {
     const body = await c.req.json().catch(() => {
       throw new ApiError(400, 'invalid_json', 'Request body must be valid JSON.');
     });
-    return c.json(addRelation(db, c.req.param('key'), body.kind, body.target, body.actorId), 201);
+    const relations = addRelation(db, c.req.param('key'), body.kind, body.target, body.actorId);
+    rt.publishChange(c.req.param('key').toUpperCase(), Number(body.actorId), 'relation');
+    rt.publishChange(String(body.target).toUpperCase(), Number(body.actorId), 'relation');
+    return c.json(relations, 201);
   });
 
   app.delete('/api/issues/:key/relations/:id', async (c) => {
     const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
-    return c.json(removeRelation(db, c.req.param('key'), Number(c.req.param('id')), (body as { actorId: number }).actorId));
+    const relations = removeRelation(db, c.req.param('key'), Number(c.req.param('id')), (body as { actorId: number }).actorId);
+    rt.publishChange(c.req.param('key').toUpperCase(), Number((body as { actorId: number }).actorId), 'relation');
+    return c.json(relations);
   });
 
   app.put('/api/issues/:key/watch', async (c) => {
     const body = await c.req.json().catch(() => {
       throw new ApiError(400, 'invalid_json', 'Request body must be valid JSON.');
     });
-    return c.json(setWatching(db, c.req.param('key'), body.actorId, Boolean(body.watching)));
+    const watchers = setWatching(db, c.req.param('key'), body.actorId, Boolean(body.watching));
+    rt.publishChange(c.req.param('key').toUpperCase(), Number(body.actorId), 'watch');
+    return c.json(watchers);
   });
 
   // ---- lineage ----
@@ -139,6 +167,38 @@ export function createApp(db: DB): Hono {
     });
     return c.json(createComponent(db, c.req.param('key'), body), 201);
   });
+
+  // ---- live collaboration ----
+
+  app.put('/api/issues/:key/presence', async (c) => {
+    const issue = getIssueByKey(db, c.req.param('key'));
+    const body = await c.req.json().catch(() => ({}) as Record<string, unknown>);
+    const actorId = Number((body as { actorId?: unknown }).actorId);
+    if (!Number.isInteger(actorId)) throw new ApiError(400, 'actor_required', 'actorId is required for presence.');
+    const leaving = Boolean((body as { leaving?: unknown }).leaving);
+    const viewers = leaving ? (rt.leave(issue.key, actorId), rt.currentViewers(issue.key)) : rt.touchPresence(issue.key, actorId);
+    return c.json({ viewers });
+  });
+
+  app.get('/api/stream', (c) =>
+    streamSSE(c, async (stream) => {
+      let alive = true;
+      const unsubscribe = rt.subscribe((ev) => {
+        if (!alive) return;
+        void stream.writeSSE({ event: ev.type, data: JSON.stringify(ev) });
+      });
+      stream.onAbort(() => {
+        alive = false;
+        unsubscribe();
+      });
+      await stream.writeSSE({ event: 'hello', data: '{}' });
+      // keepalive comments so proxies don't reap the connection
+      while (alive) {
+        await new Promise((r) => setTimeout(r, 25_000));
+        if (alive) await stream.writeSSE({ event: 'ping', data: '{}' });
+      }
+    }),
+  );
 
   // ---- analytics & graph ----
 

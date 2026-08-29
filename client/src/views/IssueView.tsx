@@ -31,6 +31,9 @@ export function IssueView() {
   const [lineageState, setLineageState] = useState<'idle' | 'running' | 'done'>('idle');
   const [ancestry, setAncestry] = useState<AncestryNode[]>([]);
 
+  const [liveViewers, setLiveViewers] = useState<number[]>([]);
+  const [liveUpdate, setLiveUpdate] = useState<{ actorId: number; kind: string; at: number } | null>(null);
+
   const load = useCallback(() => {
     setError(null);
     api
@@ -48,8 +51,64 @@ export function IssueView() {
     setLineage(null);
     setLineageState('idle');
     setTab('discussion');
+    setLiveViewers([]);
+    setLiveUpdate(null);
     load();
   }, [load]);
+
+  // Live collaboration: subscribe to the server event stream; when another
+  // actor changes this issue, refetch and surface who did it. Presence is a
+  // heartbeat with a server-side TTL.
+  useEffect(() => {
+    if (!actor) return;
+    const upperKey = key.toUpperCase();
+    const es = new EventSource('/api/stream');
+    const onChanged = (e: MessageEvent) => {
+      const ev = JSON.parse(e.data) as { key: string; actorId: number; kind: string };
+      if (ev.key !== upperKey) return;
+      load();
+      if (ev.actorId !== actor.id) setLiveUpdate({ actorId: ev.actorId, kind: ev.kind, at: Date.now() });
+    };
+    const onPresence = (e: MessageEvent) => {
+      const ev = JSON.parse(e.data) as { key: string; viewers: number[] };
+      if (ev.key === upperKey) setLiveViewers(ev.viewers.filter((v) => v !== actor.id));
+    };
+    es.addEventListener('issue_changed', onChanged);
+    es.addEventListener('presence', onPresence);
+
+    const beat = () => {
+      void fetch(`/api/issues/${upperKey}/presence`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ actorId: actor.id }),
+      })
+        .then((r) => r.json())
+        .then((d: { viewers?: number[] }) => {
+          if (Array.isArray(d.viewers)) setLiveViewers(d.viewers.filter((v) => v !== actor.id));
+        })
+        .catch(() => undefined);
+    };
+    beat();
+    const interval = window.setInterval(beat, 15_000);
+
+    return () => {
+      es.close();
+      window.clearInterval(interval);
+      void fetch(`/api/issues/${upperKey}/presence`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ actorId: actor.id, leaving: true }),
+        keepalive: true,
+      }).catch(() => undefined);
+    };
+  }, [key, actor, load]);
+
+  // let the "updated just now" flash fade after a few seconds
+  useEffect(() => {
+    if (!liveUpdate) return;
+    const t = window.setTimeout(() => setLiveUpdate(null), 6000);
+    return () => window.clearTimeout(t);
+  }, [liveUpdate]);
 
   const open = issue && !['resolved', 'verified', 'closed'].includes(issue.status);
   const isRegressionConfirmed = ancestry.length > 1;
@@ -118,6 +177,20 @@ export function IssueView() {
           <span className="count-note">
             reported by {actorById(issue.reporter_id)?.name ?? '—'} · {fmtDate(issue.created_at)} · updated {timeAgo(issue.updated_at)}
           </span>
+          {liveViewers.length > 0 && (
+            <span className="live-chip" role="status" title={liveViewers.map((v) => actorById(v)?.name ?? '?').join(', ')}>
+              <span className="live-dot" aria-hidden />
+              {liveViewers.length === 1
+                ? `${actorById(liveViewers[0])?.name.split(' ')[0] ?? 'Someone'} is viewing`
+                : `${liveViewers.length} others viewing`}
+            </span>
+          )}
+          {liveUpdate && (
+            <span className="live-chip flash" role="status">
+              <span className="live-dot" aria-hidden />
+              updated just now by {actorById(liveUpdate.actorId)?.name.split(' ')[0] ?? 'someone'}
+            </span>
+          )}
         </div>
       </div>
 
