@@ -1,5 +1,5 @@
 import type { DB } from './db.js';
-import { reindexIssue } from './db.js';
+import { reindexIssue, withTransaction } from './db.js';
 import type { Priority, Severity, Status } from './domain/types.js';
 
 // Deterministic seeded corpus: three products, ~320 issues over ~18 months,
@@ -199,6 +199,14 @@ export function seedDb(db: DB, opts: SeedOptions = {}): void {
   const log = (msg: string) => {
     if (!opts.quiet) console.log(`[seed] ${msg}`);
   };
+  const t0 = Date.now();
+  // One transaction for the whole corpus: thousands of inserts become a
+  // single fsync instead of one per statement.
+  withTransaction(db, () => seedInner(db, log));
+  log(`done in ${((Date.now() - t0) / 1000).toFixed(1)}s`);
+}
+
+function seedInner(db: DB, log: (m: string) => void): void {
 
   const insertActor = db.prepare('INSERT INTO actors (name, handle, role, hue, active) VALUES (?, ?, ?, ?, ?)');
   for (const a of ACTORS) insertActor.run(...a);
@@ -304,6 +312,7 @@ export function seedDb(db: DB, opts: SeedOptions = {}): void {
   // ---------- generate ----------
 
   for (const p of PRODUCTS) {
+    log(`seeding ${p.name} (${p.count} issues)…`);
     const pInfo = insertProduct.run(p.key, p.name, p.description);
     const productId = Number(pInfo.lastInsertRowid);
     const componentIds: number[] = [];
@@ -488,6 +497,7 @@ export function seedDb(db: DB, opts: SeedOptions = {}): void {
 
   // ---------- index everything ----------
 
+  log('building full-text index…');
   const ids = db.prepare('SELECT id FROM issues').all() as { id: number }[];
   for (const { id } of ids) reindexIssue(db, id);
 
