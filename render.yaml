@@ -1,0 +1,14 @@
+# One-click Render blueprint: connect the repo, Render reads this file.
+# Free tier; SQLite lives on the instance's ephemeral disk, so the demo
+# corpus reseeds automatically on each deploy/restart (documented in README).
+services:
+  - type: web
+    name: quarry
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/meta
+    envVars:
+      - key: NODE_VERSION
+        value: 22.12.0
