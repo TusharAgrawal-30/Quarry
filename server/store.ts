@@ -159,11 +159,28 @@ export interface CreateIssueInput {
   createdAt?: string; // seed only
 }
 
+const MAX_BODY_CHARS = 20_000;
+const MAX_COMMENT_CHARS = 10_000;
+const MAX_LABELS = 12;
+const LABEL_RE = /^[a-z0-9][a-z0-9._-]{0,39}$/;
+
+function validateLabels(raw: unknown[]): string[] {
+  const labels = [...new Set(raw.map((l) => String(l).trim().toLowerCase()).filter(Boolean))];
+  if (labels.length > MAX_LABELS) throw new ApiError(400, 'too_many_labels', `At most ${MAX_LABELS} labels per issue.`);
+  for (const l of labels) {
+    if (!LABEL_RE.test(l))
+      throw new ApiError(400, 'invalid_label', `Label "${l}" is invalid — lowercase letters, digits, dots, dashes, underscores, max 40 chars.`);
+  }
+  return labels;
+}
+
 export function createIssue(db: DB, input: CreateIssueInput) {
   const actorId = requireActor(db, input.actorId);
   const title = (input.title ?? '').trim();
   if (!title) throw new ApiError(400, 'title_required', 'Issue title is required.');
   if (title.length > 200) throw new ApiError(400, 'title_too_long', 'Issue title must be 200 characters or fewer.');
+  if (typeof input.body === 'string' && input.body.length > MAX_BODY_CHARS)
+    throw new ApiError(400, 'body_too_long', `Description must be ${MAX_BODY_CHARS.toLocaleString('en-US')} characters or fewer.`);
   if (input.severity && !SEVERITIES.includes(input.severity))
     throw new ApiError(400, 'invalid_severity', `Severity must be one of: ${SEVERITIES.join(', ')}.`);
   if (input.priority && !PRIORITIES.includes(input.priority))
@@ -191,7 +208,7 @@ export function createIssue(db: DB, input: CreateIssueInput) {
   db.prepare('UPDATE products SET next_seq = next_seq + 1 WHERE id = ?').run(product.id);
   const issueId = Number(info.lastInsertRowid);
 
-  for (const label of new Set((input.labels ?? []).map((l) => l.trim().toLowerCase()).filter(Boolean))) {
+  for (const label of validateLabels(input.labels ?? [])) {
     db.prepare('INSERT INTO issue_labels (issue_id, label) VALUES (?, ?)').run(issueId, label);
   }
   db.prepare('INSERT OR IGNORE INTO watchers (issue_id, actor_id) VALUES (?, ?)').run(issueId, actorId);
@@ -205,9 +222,15 @@ const EDITABLE: Record<string, (v: unknown, db: DB) => string | null> = {
   title: (v) => {
     const s = String(v ?? '').trim();
     if (!s) throw new ApiError(400, 'title_required', 'Issue title cannot be empty.');
+    if (s.length > 200) throw new ApiError(400, 'title_too_long', 'Issue title must be 200 characters or fewer.');
     return s;
   },
-  body: (v) => String(v ?? ''),
+  body: (v) => {
+    const s = String(v ?? '');
+    if (s.length > MAX_BODY_CHARS)
+      throw new ApiError(400, 'body_too_long', `Description must be ${MAX_BODY_CHARS.toLocaleString('en-US')} characters or fewer.`);
+    return s;
+  },
   severity: (v) => {
     if (!SEVERITIES.includes(v as Severity)) throw new ApiError(400, 'invalid_severity', `Severity must be one of: ${SEVERITIES.join(', ')}.`);
     return v as string;
@@ -242,7 +265,7 @@ export function updateIssue(db: DB, key: string, patch: Record<string, unknown>,
       logEvent(db, issue.id, actor, f === 'assignee_id' ? 'assigned' : 'edited', { field: f, from: prevStr, to: next });
     }
     if (Array.isArray(patch.labels)) {
-      const next = new Set((patch.labels as unknown[]).map((l) => String(l).trim().toLowerCase()).filter(Boolean));
+      const next = new Set(validateLabels(patch.labels as unknown[]));
       const prev = new Set(labelsFor(db, issue.id));
       for (const l of prev) if (!next.has(l)) {
         db.prepare('DELETE FROM issue_labels WHERE issue_id = ? AND label = ?').run(issue.id, l);
@@ -439,6 +462,8 @@ export function addComment(db: DB, key: string, body: string, actorId: number) {
   const issue = getIssueByKey(db, key);
   const text = (body ?? '').trim();
   if (!text) throw new ApiError(400, 'empty_comment', 'Comment body cannot be empty.');
+  if (text.length > MAX_COMMENT_CHARS)
+    throw new ApiError(400, 'comment_too_long', `Comments must be ${MAX_COMMENT_CHARS.toLocaleString('en-US')} characters or fewer.`);
   const at = nowIso();
   const info = db.prepare('INSERT INTO comments (issue_id, author_id, body, created_at) VALUES (?, ?, ?, ?)').run(issue.id, actor, text, at);
   logEvent(db, issue.id, actor, 'commented', { at });

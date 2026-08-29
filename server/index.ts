@@ -4,15 +4,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createApp } from './app.js';
 import { openDb } from './db.js';
+import { originsFromEnv } from './security.js';
 import { isSeeded, seedDb } from './seed.js';
 
 const db = openDb();
 if (!isSeeded(db)) {
-  console.log('[quarry] empty database — seeding realistic corpus…');
+  console.log('[quarry] empty database — seeding the demo corpus (a few seconds)…');
   seedDb(db);
 }
 
-const app = createApp(db);
+const app = createApp(db, { allowedOrigins: originsFromEnv() });
 
 // In production the API server also serves the built SPA.
 const dist = path.join(process.cwd(), 'client', 'dist');
