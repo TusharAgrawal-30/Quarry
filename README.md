@@ -1,5 +1,9 @@
 # Quarry
 
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
+
+**Live demo:** _one-command deploy is configured — see [Deployment](#deployment). If you're reading this on the hosted repo, the maintainer's live URL is pinned in the repo's About sidebar._
+
 A bug tracker built on an old, mostly forgotten idea: **a bug's death deserves as much structure as its life.** Modern trackers flattened the issue lifecycle into a Kanban status column and lost three things along the way — *why* a bug stopped (resolution), *what it was connected to* (dependencies and duplicates), and *whether it ever came back* (regressions). Quarry keeps all three, then goes one step further: when a new bug arrives, it checks whether it's an old, already-fixed bug returning.
 
 Seeded with a realistic corpus (~320 issues across three products with full histories), so every screen is populated on first run.
@@ -16,10 +20,11 @@ npm run dev        # → http://localhost:5000  (API on :5050)
 The database seeds itself on first run. Other commands:
 
 ```sh
-npm test           # integration suite over the real HTTP app (28 tests)
+npm test           # integration suite over the real HTTP app (36 tests)
 npm run build      # type-check + production bundle
 npm start          # production mode: one server on :5000 serving app + API
 npm run seed       # wipe ./data and reseed from scratch
+npm run test:a11y  # axe-core WCAG A/AA audit (build first; needs Playwright Chromium)
 ```
 
 ## Studying the reference: what Bugzilla got right, and what I kept
@@ -136,20 +141,67 @@ Duplicate detection asks *"has someone already reported this?"* Lineage asks a d
 
 Design: warm graphite surfaces with a single ember accent; Spline Sans / Spline Sans Mono / Fraunces; an ambient cursor-reactive canvas field that stays out of the data's way. Focus states are visible everywhere, interactive elements are labeled, contrast stays WCAG-conscious, `prefers-reduced-motion` collapses animation to a static frame, and empty/loading/error states are designed rather than defaulted.
 
+## Live collaboration
+
+Quarry is multiplayer in real time, not just structurally. Every server mutation is published on an in-process change bus and streamed to clients over **SSE** (`GET /api/stream`) — chosen over WebSockets because all events flow server → client, browsers reconnect to SSE automatically, and it adds zero dependencies or proxy-hostile protocol upgrades. An open issue page:
+
+- shows a presence chip when someone else has the same issue open (heartbeat with a 40s server-side TTL, `PUT /api/issues/:key/presence`),
+- refetches and flashes *"updated just now by ⟨name⟩"* when another actor transitions, edits, comments on, relates, or watches it — no refresh.
+
+Try it: open the same issue in two tabs, pick different identities from the actor switcher, and change status in one.
+
+## Security
+
+What's implemented, all server-side (`server/security.ts`), verified by tests:
+
+- **Security headers** on every response: a strict Content-Security-Policy (`default-src 'self'`; the only allowances are Google Fonts and inline styles for React style props; `frame-ancestors 'none'`, no remote scripts), `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, COOP, and a minimal Permissions-Policy.
+- **Explicit CORS allowlist** — never `*`. Defaults to the local dev origins; override in production with `ALLOWED_ORIGINS=https://your.host` (comma-separated).
+- **Rate limiting** on all mutating routes (POST/PATCH/PUT/DELETE): an in-memory sliding window, 120 writes/minute per client, returning `429` with `Retry-After`. Reads are unlimited.
+- **Payload caps and input validation** with explicit `4xx` errors, never silent truncation: 64 KB request-body ceiling (`413`), titles ≤ 200 chars, descriptions ≤ 20,000, comments ≤ 10,000, ≤ 12 labels with a strict charset.
+- **No injection surface**: every SQL statement is parameterized; FTS query terms are quoted; markdown renders through React elements only — no `innerHTML` anywhere, so stored XSS has nowhere to land, with CSP as the second layer.
+- **Repo hygiene**: the SQLite files (`data/`, `*.db*`) and env files are gitignored; the app needs no secrets to run.
+
+Honest scope note: there is no authentication layer — identity is a deliberate lightweight actor switcher (per the product's design), so rate limits key on client address, not user.
+
+## Accessibility
+
+- **Tested automatically**: `npm run test:a11y` boots the production build and runs axe-core (WCAG 2.0/2.1 A + AA rulesets) against Triage, Board, an issue page with the Lineage panel open, Analytics, and Products — the run fails on any violation, and CI runs it on every push. Currently: zero violations on all five screens.
+- **Manually verified, keyboard only**: ⌘K palette → search → open an issue → transition its status → comment → navigate away, with no mouse. Focus is always visible (2px accent ring), interactive elements carry labels, dialogs are `aria-modal`, live regions announce collaboration updates, and a skip-to-content link is first in the tab order.
+- **Contrast**: all text tokens — including the faintest secondary text, status pills, and severity glyphs — were adjusted to ≥ 4.5:1 against the lightest surface they appear on (verified by axe, not eyeballed).
+- **Known limitations**: drag-and-drop on the Board has no keyboard equivalent — the same action is fully available via the issue page's transition buttons (which is also where the server explains legal moves); the dependency graph is mouse-first, with the same relationships listed accessibly on each issue page.
+
+## Deployment
+
+Configured for **Render** (`render.yaml`, free tier) because the app is a classic long-lived Node server — SSE streams and an on-disk SQLite file want a persistent process, not serverless functions. Two paths:
+
+- **Render (one click)**: *New → Blueprint*, point it at this repo. The blueprint sets Node 22, `npm ci && npm run build`, `npm start`, and a health check on `/api/meta`.
+- **Any Docker host (Railway/Fly/self-hosted)**: `docker build -t quarry . && docker run -p 5000:5000 quarry`.
+
+The live database sits on the instance's disk: on the free tier it's ephemeral, so **the demo corpus reseeds automatically on each deploy or restart** (seeding is a single transaction, ~1–2s). For a demo that's a feature — the app can never arrive empty or half-migrated; for production you'd mount a persistent disk (one line in `render.yaml`) or point the store at a hosted database. Set `ALLOWED_ORIGINS` if the API will be called cross-origin; same-origin use needs no configuration.
+
 ## Tests
 
-`npm test` runs 28 integration tests through the real HTTP app (routing, JSON parsing, error mapping) against real SQLite databases — a seeded corpus plus a fresh one for lifecycle walks. Covered: seeding shape, vocabulary/meta, filters and FTS sync, full legal lifecycle with audit verification, illegal-transition rejection (with `legalNextStates` asserted), resolution requirements, reopening semantics, duplicate merge with watcher union and chain rejection, dependency cycle rejection, regression confirmation with watcher inheritance and ancestry chain, comment validation and auto-subscription, per-field audit events, lineage ranking (the true ancestor must win with a decisive trace signal) and lineage honesty (strong verdicts require consensus; empty history finds nothing), analytics aggregates, graph consistency, and structured 404/400 errors.
+`npm test` runs 36 integration tests through the real HTTP app (routing, JSON parsing, error mapping) against real SQLite databases — a seeded corpus plus a fresh one for lifecycle walks. Covered: seeding shape, vocabulary/meta, filters and FTS sync, full legal lifecycle with audit verification, illegal-transition rejection (with `legalNextStates` asserted), resolution requirements, reopening semantics, duplicate merge with watcher union and chain rejection, dependency cycle rejection, regression confirmation with watcher inheritance and ancestry chain, comment validation and auto-subscription, per-field audit events, lineage ranking (the true ancestor must win with a decisive trace signal) and lineage honesty (strong verdicts require consensus; empty history finds nothing), analytics aggregates, graph consistency, and structured 404/400 errors. The hardening batch added: security-header and CSP assertions, CORS allowlist behavior (reflects allowed origins, never wildcards), rate-limit 429s with `Retry-After` (writes limited, reads open), 413 payload rejection, oversized description/comment/label rejection, presence join/leave semantics, and an SSE assertion that a mutation by one actor is delivered as an `issue_changed` event naming the issue and the actor. Accessibility has its own runner: `npm run test:a11y` (see above).
 
 ## Five-minute walkthrough
 
-1. `npm install && npm run dev`, open `http://localhost:5000`. Triage is populated with ~320 issues.
+1. Open the live URL (or `npm install && npm run dev` → `http://localhost:5000`). Triage is populated with ~320 issues immediately.
 2. Type a word in the search box (try `handshake`), flip a severity filter, sort by severity. Open any issue.
 3. On the issue: change severity, assign someone, comment — then open the **History** tab: every one of those actions is in the audit rail with actor and timestamp.
 4. **Board**: drag a card from `unconfirmed` toward `closed` — the column dims and explains itself; drop it anyway and the server's 409 with legal next states surfaces as the error. Drag to `confirmed`, then to `resolved` — a resolution is demanded.
 5. Prove enforcement is server-side with the `curl` from the workflow section above.
 6. **The beat**: press ⌘K, type `intermittent websocket`, open the unconfirmed report, press **Scan ancestry**. Watch the fixed ancestor light up with per-signal evidence, click **Confirm regression of …**, and see the ancestry chain render and the watchers arrive. Check **Analytics** — the regression counter ticked.
 7. **Graph**: hover the node you just linked — its lineage edge is the violet one.
-8. `npm test` — 28 passing.
+8. **Live collaboration**: open the same issue in two tabs (pick different people in the actor switcher, top right). Change status in one tab — the other updates in place with *"updated just now by ⟨name⟩"*, and each tab shows who else is viewing.
+9. `npm test` — 36 passing. `npm run test:a11y` — zero WCAG A/AA violations.
+
+## What changed since the first cut
+
+- **Security**: strict CSP + security headers, explicit CORS allowlist, per-client write rate limiting, request-size caps, and hard input limits with structured errors — all covered by new tests.
+- **Live collaboration**: SSE change stream + per-issue presence; open issues update live across sessions with attribution.
+- **Verified accessibility**: axe-core (WCAG A/AA) audit wired into the test suite and CI across five screens; contrast tokens corrected to measured ≥ 4.5:1; keyboard-only path manually verified.
+- **CI**: GitHub Actions runs the build, the integration suite, and the accessibility audit on every push (badge above).
+- **Deployability**: Render blueprint + Dockerfile; seeding now runs as one transaction (~1–2s with progress logs) so first boot never looks like a hang.
 
 ## License
 
