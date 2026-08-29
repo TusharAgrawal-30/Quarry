@@ -458,3 +458,167 @@ describe('lifecycle on a fresh database', () => {
     assert.equal(res.data.error, 'invalid_json');
   });
 });
+
+// ─── security hardening ────────────────────────────────────────────────────
+
+describe('security hardening', () => {
+  let call: ReturnType<typeof client>;
+  let app: Hono;
+
+  before(() => {
+    const db = openDb(':memory:');
+    db.prepare(`INSERT INTO actors (name, handle, role, hue, active) VALUES ('Sec Tester', 'sec', 'QA', 30, 1)`).run();
+    app = createApp(db, { allowedOrigins: ['http://allowed.example'], rateLimit: { max: 5, windowMs: 60_000 }, maxBodyBytes: 2048 });
+    call = client(app);
+  });
+
+  it('sets security headers on every response', async () => {
+    const res = await app.request('/api/meta');
+    assert.equal(res.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(res.headers.get('x-frame-options'), 'DENY');
+    assert.equal(res.headers.get('referrer-policy'), 'no-referrer');
+    const csp = res.headers.get('content-security-policy') ?? '';
+    assert.ok(csp.includes("default-src 'self'"), 'CSP present');
+    assert.ok(csp.includes("frame-ancestors 'none'"));
+    assert.ok(csp.includes('fonts.googleapis.com'), 'CSP allows the font stylesheet host');
+  });
+
+  it('CORS reflects only allowlisted origins — never a wildcard', async () => {
+    const ok = await app.request('/api/meta', { headers: { origin: 'http://allowed.example' } });
+    assert.equal(ok.headers.get('access-control-allow-origin'), 'http://allowed.example');
+    const bad = await app.request('/api/meta', { headers: { origin: 'http://evil.example' } });
+    const acao = bad.headers.get('access-control-allow-origin');
+    assert.ok(acao !== '*' && acao !== 'http://evil.example', `unexpected ACAO: ${acao}`);
+  });
+
+  it('rate-limits mutating routes with 429 + Retry-After, while reads stay open', async () => {
+    const results: number[] = [];
+    for (let i = 0; i < 7; i++) {
+      const res = await call('POST', '/api/products', { key: `RL${i}A`, name: `RL ${i}` });
+      results.push(res.status);
+    }
+    assert.ok(results.slice(0, 5).every((s) => s === 201), `first five writes pass: ${results}`);
+    assert.ok(results.slice(5).every((s) => s === 429), `then 429: ${results}`);
+    const limited = await app.request('/api/products', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: 'RLX', name: 'x' }),
+    });
+    assert.ok(Number(limited.headers.get('retry-after')) >= 1);
+    // reads are not limited
+    for (let i = 0; i < 10; i++) assert.equal((await call('GET', '/api/meta')).status, 200);
+  });
+
+  it('rejects oversized request bodies with 413', async () => {
+    const payload = JSON.stringify({ title: 'x'.repeat(4000), actorId: 1 });
+    const res = await app.request('/api/issues', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-length': String(payload.length) },
+      body: payload,
+    });
+    assert.equal(res.status, 413);
+    assert.equal(((await res.json()) as Json).error, 'payload_too_large');
+  });
+});
+
+describe('input validation limits', () => {
+  let call: ReturnType<typeof client>;
+  let compId: number;
+
+  before(async () => {
+    const db = openDb(':memory:');
+    db.prepare(`INSERT INTO actors (name, handle, role, hue, active) VALUES ('Val Tester', 'val', 'QA', 30, 1)`).run();
+    call = client(createApp(db));
+    await call('POST', '/api/products', { key: 'VAL', name: 'Validation' });
+    compId = (await call('POST', '/api/products/VAL/components', { name: 'core' })).data.id;
+  });
+
+  it('rejects oversized descriptions and comments with clear errors, not truncation', async () => {
+    const tooLong = await call('POST', '/api/issues', { productKey: 'VAL', componentId: compId, title: 'ok', body: 'x'.repeat(20_001), actorId: 1 });
+    assert.equal(tooLong.status, 400);
+    assert.equal(tooLong.data.error, 'body_too_long');
+
+    const issue = (await call('POST', '/api/issues', { productKey: 'VAL', componentId: compId, title: 'ok', actorId: 1 })).data;
+    const badComment = await call('POST', `/api/issues/${issue.key}/comments`, { body: 'y'.repeat(10_001), actorId: 1 });
+    assert.equal(badComment.status, 400);
+    assert.equal(badComment.data.error, 'comment_too_long');
+  });
+
+  it('rejects malformed and excessive labels', async () => {
+    const badLabel = await call('POST', '/api/issues', { productKey: 'VAL', componentId: compId, title: 'x', labels: ['<script>'], actorId: 1 });
+    assert.equal(badLabel.status, 400);
+    assert.equal(badLabel.data.error, 'invalid_label');
+    const tooMany = await call('POST', '/api/issues', {
+      productKey: 'VAL',
+      componentId: compId,
+      title: 'x',
+      labels: Array.from({ length: 13 }, (_, i) => `l${i}`),
+      actorId: 1,
+    });
+    assert.equal(tooMany.status, 400);
+    assert.equal(tooMany.data.error, 'too_many_labels');
+  });
+});
+
+// ─── live collaboration ────────────────────────────────────────────────────
+
+describe('live collaboration', () => {
+  let call: ReturnType<typeof client>;
+  let app: Hono;
+  let issueKey: string;
+
+  before(async () => {
+    const db = openDb(':memory:');
+    db.prepare(`INSERT INTO actors (name, handle, role, hue, active) VALUES ('Live One', 'live1', 'QA', 30, 1)`).run();
+    db.prepare(`INSERT INTO actors (name, handle, role, hue, active) VALUES ('Live Two', 'live2', 'Dev', 40, 1)`).run();
+    app = createApp(db);
+    call = client(app);
+    await call('POST', '/api/products', { key: 'LIVE', name: 'Live' });
+    const comp = (await call('POST', '/api/products/LIVE/components', { name: 'core' })).data;
+    issueKey = (await call('POST', '/api/issues', { productKey: 'LIVE', componentId: comp.id, title: 'watched live', actorId: 1 })).data.key;
+  });
+
+  it('presence heartbeat registers viewers and leaving clears them', async () => {
+    const a = await call('PUT', `/api/issues/${issueKey}/presence`, { actorId: 1 });
+    assert.deepEqual(a.data.viewers, [1]);
+    const b = await call('PUT', `/api/issues/${issueKey}/presence`, { actorId: 2 });
+    assert.deepEqual(b.data.viewers.sort(), [1, 2]);
+    const gone = await call('PUT', `/api/issues/${issueKey}/presence`, { actorId: 2, leaving: true });
+    assert.deepEqual(gone.data.viewers, [1]);
+    const noActor = await call('PUT', `/api/issues/${issueKey}/presence`, {});
+    assert.equal(noActor.status, 400);
+  });
+
+  it('SSE stream delivers issue_changed events for mutations by other actors', async () => {
+    const controller = new AbortController();
+    const res = await app.request('/api/stream', { signal: controller.signal });
+    assert.equal(res.status, 200);
+    assert.ok((res.headers.get('content-type') ?? '').includes('text/event-stream'));
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const readUntil = async (marker: string, ms: number): Promise<string> => {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        const { value, done } = await Promise.race([
+          reader.read(),
+          new Promise<{ value: undefined; done: boolean }>((r) => setTimeout(() => r({ value: undefined, done: false }), 300)),
+        ]);
+        if (done) break;
+        if (value) buffer += decoder.decode(value, { stream: true });
+        if (buffer.includes(marker)) return buffer;
+      }
+      return buffer;
+    };
+
+    await readUntil('hello', 2000);
+    const t = await call('POST', `/api/issues/${issueKey}/transition`, { to: 'confirmed', actorId: 2 });
+    assert.equal(t.status, 200);
+    const out = await readUntil('issue_changed', 4000);
+    assert.ok(out.includes('issue_changed'), 'stream carries the change event');
+    assert.ok(out.includes(issueKey), 'event names the changed issue');
+    assert.ok(out.includes('"actorId":2'), 'event names the acting user');
+    controller.abort();
+  });
+});
