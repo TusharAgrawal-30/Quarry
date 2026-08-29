@@ -6,7 +6,7 @@
   "type": "module",
  "engines": {
   "node": ">=22.5"
-}
+},
   "scripts": {
     "dev": "concurrently -k -n api,web -c yellow,cyan \"npm run dev:api\" \"npm run dev:web\"",
     "dev:api": "cross-env NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx watch server/index.ts",
