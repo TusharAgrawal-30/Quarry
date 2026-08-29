@@ -14,23 +14,26 @@
     "seed": "cross-env NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/seed-cli.ts",
     "build": "tsc -p tsconfig.json --noEmit && vite build client",
     "start": "cross-env NODE_ENV=production NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx server/index.ts",
-    "test": "cross-env NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --test tests/api.test.ts"
+    "test": "cross-env NODE_OPTIONS=--disable-warning=ExperimentalWarning tsx --test tests/api.test.ts",
+    "test:a11y": "cross-env NODE_OPTIONS=--disable-warning=ExperimentalWarning node scripts/a11y.mjs"
   },
   "dependencies": {
     "@hono/node-server": "^1.13.7",
+    "cross-env": "^7.0.3",
     "hono": "^4.6.14",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0"
+    "react-router-dom": "^6.28.0",
+    "tsx": "^4.19.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.17",
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
+    "axe-core": "4.10",
     "concurrently": "^9.1.0",
-    "cross-env": "^7.0.3",
-    "tsx": "^4.19.2",
+    "playwright-core": "1.49",
     "typescript": "^5.7.2",
     "vite": "^6.0.3"
   }

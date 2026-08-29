@@ -24,7 +24,7 @@ export function StatusPill({ status, resolution }: { status: string; resolution?
     <span className="status-pill" style={{ color, background: `color-mix(in srgb, ${color} 13%, transparent)` }}>
       <span className="dot" aria-hidden />
       {statusLabel(status)}
-      {resolution ? <span style={{ opacity: 0.75, textTransform: 'none', letterSpacing: 0 }}>· {resolution}</span> : null}
+      {resolution ? <span style={{ textTransform: 'none', letterSpacing: 0, fontWeight: 500 }}>· {resolution}</span> : null}
     </span>
   );
 }
