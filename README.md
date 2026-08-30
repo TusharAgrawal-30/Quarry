@@ -1,8 +1,7 @@
 # Quarry
 **Live demo:** https://quarry-rz2o.onrender.com
-[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
-**Live demo:** _one-command deploy is configured — see [Deployment](#deployment). If you're reading this on the hosted repo, the maintainer's live URL is pinned in the repo's About sidebar._
+[![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
 A bug tracker built on an old, mostly forgotten idea: **a bug's death deserves as much structure as its life.** Modern trackers flattened the issue lifecycle into a Kanban status column and lost three things along the way — *why* a bug stopped (resolution), *what it was connected to* (dependencies and duplicates), and *whether it ever came back* (regressions). Quarry keeps all three, then goes one step further: when a new bug arrives, it checks whether it's an old, already-fixed bug returning.
 
@@ -10,7 +9,7 @@ Seeded with a realistic corpus (~320 issues across three products with full hist
 
 ## Quick start
 
-Requires **Node 22.5+** (uses the built-in `node:sqlite` — nothing to compile, no external services).
+Requires **Node 24+** (`node:sqlite` with FTS5 needs Node 24 — Node 22's build of `node:sqlite` lacks FTS5 support even with the experimental flag enabled, which will fail with `Error: no such module: fts5`).
 
 ```sh
 npm install
@@ -172,10 +171,10 @@ Honest scope note: there is no authentication layer — identity is a deliberate
 
 ## Deployment
 
-Configured for **Render** (`render.yaml`, free tier) because the app is a classic long-lived Node server — SSE streams and an on-disk SQLite file want a persistent process, not serverless functions. Two paths:
+Configured for **Render** (`render.yaml`, free tier) because the app is a classic long-lived Node server — SSE streams and an on-disk SQLite file want a persistent process, not serverless functions. Render deploys via its **native Node builder**, reading `render.yaml` directly (it does not use the Dockerfile) — `render.yaml` pins `NODE_VERSION: 24.6.0`, which is required for `node:sqlite`'s FTS5 support. The `Dockerfile` is provided separately for Docker-based hosts.
 
-- **Render (one click)**: *New → Blueprint*, point it at this repo. The blueprint sets Node 22, `npm ci && npm run build`, `npm start`, and a health check on `/api/meta`.
-- **Any Docker host (Railway/Fly/self-hosted)**: `docker build -t quarry . && docker run -p 5000:5000 quarry`.
+- **Render (one click)**: *New → Blueprint*, point it at this repo. The blueprint pins Node 24, runs `npm ci && npm run build`, `npm start`, and a health check on `/api/meta`.
+- **Any Docker host (Railway/Fly/self-hosted)**: `docker build -t quarry . && docker run -p 5000:5000 quarry`. The Dockerfile's runtime stage also targets `node:24-slim` for the same FTS5 requirement.
 
 The live database sits on the instance's disk: on the free tier it's ephemeral, so **the demo corpus reseeds automatically on each deploy or restart** (seeding is a single transaction, ~1–2s). For a demo that's a feature — the app can never arrive empty or half-migrated; for production you'd mount a persistent disk (one line in `render.yaml`) or point the store at a hosted database. Set `ALLOWED_ORIGINS` if the API will be called cross-origin; same-origin use needs no configuration.
 
@@ -201,7 +200,7 @@ The live database sits on the instance's disk: on the free tier it's ephemeral, 
 - **Live collaboration**: SSE change stream + per-issue presence; open issues update live across sessions with attribution.
 - **Verified accessibility**: axe-core (WCAG A/AA) audit wired into the test suite and CI across five screens; contrast tokens corrected to measured ≥ 4.5:1; keyboard-only path manually verified.
 - **CI**: GitHub Actions runs the build, the integration suite, and the accessibility audit on every push (badge above).
-- **Deployability**: Render blueprint + Dockerfile; seeding now runs as one transaction (~1–2s with progress logs) so first boot never looks like a hang.
+- **Deployability**: Render blueprint pinned to Node 24 + Dockerfile for Docker-based hosts; seeding now runs as one transaction (~1–2s with progress logs) so first boot never looks like a hang.
 
 ## License
 
