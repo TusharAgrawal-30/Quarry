@@ -11,4 +11,4 @@ services:
     healthCheckPath: /api/meta
     envVars:
       - key: NODE_VERSION
-        value: 22.12.0
+        value: 24.6.0
