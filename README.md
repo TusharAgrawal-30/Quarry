@@ -1,5 +1,5 @@
 # Quarry
-
+**Live demo:** https://quarry-rz2o.onrender.com
 [![CI](../../actions/workflows/ci.yml/badge.svg)](../../actions/workflows/ci.yml)
 
 **Live demo:** _one-command deploy is configured — see [Deployment](#deployment). If you're reading this on the hosted repo, the maintainer's live URL is pinned in the repo's About sidebar._
